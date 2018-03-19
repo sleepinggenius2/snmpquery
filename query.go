@@ -17,14 +17,7 @@ type Query struct {
 }
 
 func (q *Query) add(name string, t models.Type, oid string, formats []models.Format) {
-	format := models.FormatAll
-	if len(formats) > 0 {
-		format = models.FormatNone
-		for _, f := range formats {
-			format |= f
-		}
-	}
-
+	format := models.ResolveFormat(formats)
 	item := QueryItem{
 		Format: t.GetValueFormatter(format),
 		Name:   name,

@@ -16,10 +16,7 @@ type Client struct {
 	snmp *gosnmp.GoSNMP
 }
 
-// Get is used to get the given scalar node formatted with the given format
-func (c Client) Get(node models.ScalarNode, format ...models.Format) (val models.Value, err error) {
-	oids := []string{node.OidFormatted}
-
+func (c Client) get(node models.ScalarNode, oids []string, format []models.Format) (val models.Value, err error) {
 	result, err := c.snmp.Get(oids)
 	if err != nil {
 		return val, errors.Wrap(err, "SNMP Get")
@@ -27,21 +24,19 @@ func (c Client) Get(node models.ScalarNode, format ...models.Format) (val models
 
 	f := models.ResolveFormat(format)
 
-	return node.Type.GetValueFormatter(f)(result.Variables[0].Value), nil
+	return node.FormatValue(result.Variables[0].Value, f), nil
+}
+
+// Get is used to get the given scalar node formatted with the given format
+func (c Client) Get(node models.ScalarNode, format ...models.Format) (val models.Value, err error) {
+	oids := []string{node.OidFormatted}
+	return c.get(node, oids, format)
 }
 
 // Get is used to get the given column node with the given index formatted with the given format
 func (c Client) GetIndex(node models.ColumnNode, index string, format ...models.Format) (val models.Value, err error) {
 	oids := []string{node.OidFormatted + "." + index}
-
-	result, err := c.snmp.Get(oids)
-	if err != nil {
-		return val, errors.Wrap(err, "SNMP Get")
-	}
-
-	f := models.ResolveFormat(format)
-
-	return node.Type.GetValueFormatter(f)(result.Variables[0].Value), nil
+	return c.get(models.ScalarNode(node), oids, format)
 }
 
 // GetAll executes the given query

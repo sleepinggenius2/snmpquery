@@ -17,6 +17,10 @@ type Column struct {
 	Format models.Format
 }
 
+func (c Column) FormatValue(value interface{}) models.Value {
+	return c.Node.FormatValue(value, c.Format)
+}
+
 // Row represents a table row
 type Row struct {
 	Index  []models.Value
@@ -68,36 +72,21 @@ func (c Client) Table(table Table, index ...string) (results map[string]Row, err
 		return nil, errors.New("No columns given")
 	}
 
-	tableIndex := table.Node.Index()
-
 	indexLen := len(index)
-	if indexLen == len(tableIndex) {
+	if indexLen == len(table.Node.Index()) {
 		return c.singleRow(table.Node, columns, index)
 	}
 
 	results = make(map[string]Row)
-
-	numIndices := len(tableIndex) - indexLen
-
-	indexValueFormatters := make(map[string]models.ValueFormatter, numIndices)
-	indices := make([]string, numIndices)
-	for i, indexNode := range tableIndex {
-		if i < indexLen {
-			continue
-		}
-		indexValueFormatters[indexNode.Name] = indexNode.Type.GetValueFormatter(models.FormatAll)
-		indices[i-indexLen] = indexNode.Name
-	}
-
 	for _, column := range columns {
 		//TODO: Check if column is part of the table
 
 		rootOid := column.Node.OidFormatted
-		if len(index) > 0 {
+		if indexLen > 0 {
 			rootOid += "." + strings.Join(index, ".")
 		}
 
-		fn := walkFunc(table.Node, column, index, rootOid, indexValueFormatters, numColumns, &results)
+		fn := walkFunc(table.Node, column, numColumns, index, rootOid, results)
 		err = c.snmp.BulkWalk(rootOid, fn)
 		if err != nil {
 			return
@@ -132,10 +121,9 @@ func (c Client) singleRow(table models.TableNode, columns []Column, index []stri
 	return map[string]Row{columnIndex: row}, nil
 }
 
-func walkFunc(table models.TableNode, column Column, index []string, rootOid string, valueFormatters map[string]models.ValueFormatter, numColumns int, results *map[string]Row) func(gosnmp.SnmpPDU) error {
+func walkFunc(table models.TableNode, column Column, numColumns int, index []string, rootOid string, results map[string]Row) gosnmp.WalkFunc {
 	indexLen := len(index)
-	numIndices := len(table.Row.Index) - indexLen
-	valueFormatter := column.Node.Type.GetValueFormatter(column.Format)
+
 	return func(pdu gosnmp.SnmpPDU) error {
 		switch pdu.Type {
 		case gosnmp.NoSuchObject:
@@ -145,10 +133,10 @@ func walkFunc(table models.TableNode, column Column, index []string, rootOid str
 		}
 
 		index := pdu.Name[len(rootOid)+2:]
-		if _, ok := (*results)[index]; !ok {
+		if _, ok := results[index]; !ok {
 			indexParts := pdu.Oid[column.Node.OidLen+uint(indexLen):]
-			rowIndex := getIndex(table, indexLen, numIndices, indexParts, valueFormatters)
-			(*results)[index] = Row{
+			rowIndex := getIndex(table, indexLen, indexParts)
+			results[index] = Row{
 				Index:  rowIndex,
 				Values: make(map[string]models.Value, numColumns),
 			}
@@ -160,20 +148,21 @@ func walkFunc(table models.TableNode, column Column, index []string, rootOid str
 		default:
 			val = gosnmp.ToBigInt(pdu.Value).Int64()
 		}
-		(*results)[index].Values[column.Name] = valueFormatter(val)
+		results[index].Values[column.Name] = column.FormatValue(val)
 		return nil
 	}
 }
 
-func getIndex(table models.TableNode, indexLen int, numIndices int, indexParts []int, valueFormatters map[string]models.ValueFormatter) (index []models.Value) {
+func getIndex(table models.TableNode, indexLen int, indexParts []int) (index []models.Value) {
+	indices := table.Index()
+	numIndices := len(indices)
 	index = make([]models.Value, numIndices)
-	for j, indexNode := range table.Row.Index {
-		if j < indexLen {
-			continue
-		}
+
+	for i := 0; i < numIndices-indexLen; i++ {
+		indexNode := indices[i+indexLen]
 		var val interface{}
 		if indexNode.Type.BaseType == types.BaseTypeOctetString {
-			maxLen := len(indexParts) - numIndices + j - indexLen + 1
+			maxLen := len(indexParts) - numIndices + i + 1
 			if len(indexNode.Type.Ranges) == 1 {
 				r := indexNode.Type.Ranges[0]
 				maxValue := int(r.MaxValue)
@@ -188,7 +177,7 @@ func getIndex(table models.TableNode, indexLen int, numIndices int, indexParts [
 			val = int64(indexParts[0])
 			indexParts = indexParts[1:]
 		}
-		index[j-indexLen] = valueFormatters[indexNode.Name](val)
+		index[i] = indexNode.FormatValue(val, models.FormatAll)
 	}
 
 	return
