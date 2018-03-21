@@ -87,7 +87,7 @@ func (c Client) Table(table Table, index ...string) (results map[string]Row, err
 			rootOid += "." + strings.Join(index, ".")
 		}
 
-		fn := walkFunc(table.Node, column, numColumns, index, rootOid, results)
+		fn := walkFunc(table, column, numColumns, index, rootOid, results)
 		err = c.snmp.BulkWalk(rootOid, fn)
 		if err != nil {
 			return
@@ -122,7 +122,7 @@ func (c Client) singleRow(table models.TableNode, columns []Column, index []stri
 	return map[string]Row{columnIndex: row}, nil
 }
 
-func walkFunc(table models.TableNode, column Column, numColumns int, index []string, rootOid string, results map[string]Row) gosnmp.WalkFunc {
+func walkFunc(table Table, column Column, numColumns int, index []string, rootOid string, results map[string]Row) gosnmp.WalkFunc {
 	indexLen := len(index)
 
 	return func(pdu gosnmp.SnmpPDU) error {
@@ -136,7 +136,7 @@ func walkFunc(table models.TableNode, column Column, numColumns int, index []str
 		index := pdu.Name[len(rootOid)+2:]
 		if _, ok := results[index]; !ok {
 			indexParts := pdu.Oid[column.Node.OidLen+uint(indexLen):]
-			rowIndex := getIndex(table, indexLen, indexParts, table.IndexFormat)
+			rowIndex := getIndex(table.Node, indexLen, indexParts, table.IndexFormat)
 			results[index] = Row{
 				Index:  rowIndex,
 				Values: make(map[string]models.Value, numColumns),
