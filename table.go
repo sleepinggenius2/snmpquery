@@ -35,8 +35,9 @@ func min(a, b int) int {
 }
 
 type Table struct {
-	Node    models.TableNode
-	columns []Column
+	IndexFormat models.Format
+	Node        models.TableNode
+	columns     []Column
 }
 
 func (t *Table) Column(node models.ColumnNode, format ...models.Format) {
@@ -60,8 +61,8 @@ func (t *Table) Columns() []Column {
 	return columns
 }
 
-func NewTable(node models.TableNode) Table {
-	return Table{Node: node}
+func NewTable(node models.TableNode, indexFormat ...models.Format) Table {
+	return Table{Node: node, IndexFormat: models.ResolveFormat(indexFormat, models.FormatNone)}
 }
 
 // Table queries the client for the given table at the given index
@@ -135,7 +136,7 @@ func walkFunc(table models.TableNode, column Column, numColumns int, index []str
 		index := pdu.Name[len(rootOid)+2:]
 		if _, ok := results[index]; !ok {
 			indexParts := pdu.Oid[column.Node.OidLen+uint(indexLen):]
-			rowIndex := getIndex(table, indexLen, indexParts)
+			rowIndex := getIndex(table, indexLen, indexParts, table.IndexFormat)
 			results[index] = Row{
 				Index:  rowIndex,
 				Values: make(map[string]models.Value, numColumns),
@@ -153,7 +154,7 @@ func walkFunc(table models.TableNode, column Column, numColumns int, index []str
 	}
 }
 
-func getIndex(table models.TableNode, indexLen int, indexParts []int) (index []models.Value) {
+func getIndex(table models.TableNode, indexLen int, indexParts []int, indexFormat models.Format) (index []models.Value) {
 	indices := table.Index()
 	numIndices := len(indices)
 	index = make([]models.Value, numIndices)
@@ -177,7 +178,7 @@ func getIndex(table models.TableNode, indexLen int, indexParts []int) (index []m
 			val = int64(indexParts[0])
 			indexParts = indexParts[1:]
 		}
-		index[i] = indexNode.FormatValue(val, models.FormatAll)
+		index[i] = indexNode.FormatValue(val, indexFormat)
 	}
 
 	return
