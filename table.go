@@ -1,8 +1,6 @@
 package snmpquery
 
 import (
-	"strings"
-
 	"github.com/pkg/errors"
 
 	"github.com/sleepinggenius2/gosmi/models"
@@ -27,17 +25,11 @@ type Row struct {
 	Values map[string]models.Value
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 type Table struct {
-	IndexFormat models.Format
-	Node        models.TableNode
-	columns     []Column
+	IndexFormat  models.Format
+	ColumnFormat models.Format
+	Node         models.TableNode
+	columns      []Column
 }
 
 func (t *Table) Column(node models.ColumnNode, format ...models.Format) {
@@ -45,7 +37,7 @@ func (t *Table) Column(node models.ColumnNode, format ...models.Format) {
 }
 
 func (t *Table) NamedColumn(name string, node models.ColumnNode, format ...models.Format) {
-	column := Column{Name: name, Node: node, Format: models.ResolveFormat(format)}
+	column := Column{Name: name, Node: node, Format: models.ResolveFormat(format, t.ColumnFormat)}
 	t.columns = append(t.columns, column)
 }
 
@@ -66,7 +58,7 @@ func NewTable(node models.TableNode, indexFormat ...models.Format) Table {
 }
 
 // Table queries the client for the given table at the given index
-func (c Client) Table(table Table, index ...string) (results map[string]Row, err error) {
+func (c Client) Table(table Table, index ...interface{}) (results map[string]Row, err error) {
 	columns := table.Columns()
 	numColumns := len(columns)
 	if numColumns == 0 {
@@ -78,17 +70,24 @@ func (c Client) Table(table Table, index ...string) (results map[string]Row, err
 		return c.singleRow(table.Node, columns, index)
 	}
 
+	indexSlice, err := table.Node.BuildIndex(index...)
+	if err != nil {
+		return nil, errors.Wrap(err, "Build index")
+	}
+
 	results = make(map[string]Row)
 	for _, column := range columns {
-		//TODO: Check if column is part of the table
-
-		rootOid := column.Node.OidFormatted
-		if indexLen > 0 {
-			rootOid += "." + strings.Join(index, ".")
+		if !table.Node.ParentOf(column.Node.BaseNode) {
+			return nil, errors.Errorf("Column %s is not in table %s", column.Node.Name, table.Node.Name)
 		}
 
-		fn := walkFunc(table, column, numColumns, index, rootOid, results)
-		err = c.snmp.BulkWalk(rootOid, fn)
+		rootOid := column.Node.Oid
+		if len(indexSlice) != 0 {
+			rootOid = append(rootOid, indexSlice...)
+		}
+
+		fn := walkFunc(table, column, numColumns, indexLen, rootOid, results)
+		err = c.snmp.BulkWalkOID(rootOid, fn)
 		if err != nil {
 			return
 		}
@@ -97,12 +96,15 @@ func (c Client) Table(table Table, index ...string) (results map[string]Row, err
 	return
 }
 
-func (c Client) singleRow(table models.TableNode, columns []Column, index []string) (results map[string]Row, err error) {
-	columnIndex := strings.Join(index, ".")
+func (c Client) singleRow(table models.TableNode, columns []Column, index []interface{}) (results map[string]Row, err error) {
+	indexSlice, err := table.BuildIndex(index...)
+	if err != nil {
+		return nil, errors.Wrap(err, "Build index")
+	}
 
 	q := Query{}
 	for _, column := range columns {
-		q.NamedColumn(column.Name, column.Node, columnIndex, column.Format)
+		q.NamedColumn(column.Name, column.Node, indexSlice, column.Format)
 	}
 
 	result, err := c.GetAll(q)
@@ -116,14 +118,14 @@ func (c Client) singleRow(table models.TableNode, columns []Column, index []stri
 	}
 
 	for i, indexValue := range index {
-		row.Index[i] = models.Value{Formatted: indexValue, Raw: indexValue}
+		row.Index[i] = models.Value{Raw: indexValue}
 	}
 
-	return map[string]Row{columnIndex: row}, nil
+	return map[string]Row{GetIndexKey(indexSlice): row}, nil
 }
 
-func walkFunc(table Table, column Column, numColumns int, index []string, rootOid string, results map[string]Row) gosnmp.WalkFunc {
-	indexLen := len(index)
+func walkFunc(table Table, column Column, numColumns int, indexLen int, rootOid types.Oid, results map[string]Row) gosnmp.WalkFunc {
+	oidLen := len(rootOid)
 
 	return func(pdu gosnmp.SnmpPDU) error {
 		switch pdu.Type {
@@ -133,9 +135,9 @@ func walkFunc(table Table, column Column, numColumns int, index []string, rootOi
 			return nil
 		}
 
-		index := pdu.Name[len(rootOid)+2:]
+		indexParts := pdu.Oid[oidLen:]
+		index := GetIndexKey(indexParts)
 		if _, ok := results[index]; !ok {
-			indexParts := pdu.Oid[column.Node.OidLen+uint(indexLen):]
 			rowIndex := getIndex(table.Node, indexLen, indexParts, table.IndexFormat)
 			results[index] = Row{
 				Index:  rowIndex,
@@ -147,35 +149,72 @@ func walkFunc(table Table, column Column, numColumns int, index []string, rootOi
 		case types.BaseTypeOctetString, types.BaseTypeBits:
 			val = pdu.Value
 		default:
-			val = gosnmp.ToBigInt(pdu.Value).Int64()
+			val, _ = models.ToInt64(pdu.Value)
 		}
 		results[index].Values[column.Name] = column.FormatValue(val)
 		return nil
 	}
 }
 
-func getIndex(table models.TableNode, indexLen int, indexParts []int, indexFormat models.Format) (index []models.Value) {
+func GetIndexKey(indexParts types.Oid) string {
+	indexBytes := make([]byte, 4*len(indexParts))
+	for i, part := range indexParts {
+		indexBytes[i<<2] = byte((part >> 24) & 0xff)
+		indexBytes[i<<2+1] = byte((part >> 16) & 0xff)
+		indexBytes[i<<2+2] = byte((part >> 8) & 0xff)
+		indexBytes[i<<2+3] = byte(part & 0xff)
+	}
+	return string(indexBytes)
+}
+
+func getIndex(table models.TableNode, indexLen int, indexParts types.Oid, indexFormat models.Format) (index []models.Value) {
 	indices := table.Index()
 	numIndices := len(indices)
-	index = make([]models.Value, numIndices)
+	index = make([]models.Value, numIndices-indexLen)
+	implied := table.Implied()
 
 	for i := 0; i < numIndices-indexLen; i++ {
 		indexNode := indices[i+indexLen]
 		var val interface{}
-		if indexNode.Type.BaseType == types.BaseTypeOctetString {
-			maxLen := len(indexParts) - numIndices + i + 1
-			if len(indexNode.Type.Ranges) == 1 {
-				r := indexNode.Type.Ranges[0]
-				maxValue := int(r.MaxValue)
-				l := min(maxValue, maxLen)
-				val = indexParts[:l]
-				indexParts = indexParts[l:]
+		switch indexNode.Type.BaseType {
+		case types.BaseTypeObjectIdentifier:
+			var oidLen int
+			if i < numIndices-indexLen-1 || !implied {
+				oidLen = int(indexParts[0])
+				indexParts = indexParts[1:]
+				if oidLen > len(indexParts) {
+					// TODO: This shouldn't happen, what do we do?
+					return
+				}
 			} else {
-				val = indexParts[:maxLen]
-				indexParts = indexParts[maxLen:]
+				oidLen = len(indexParts)
 			}
-		} else {
-			val = int64(indexParts[0])
+			val = indexParts[:oidLen]
+			indexParts = indexParts[oidLen:]
+		case types.BaseTypeOctetString, types.BaseTypeBits:
+			var strLen int
+			if i < numIndices-indexLen-1 || !implied {
+				strLen = int(indexParts[0])
+				indexParts = indexParts[1:]
+				if strLen > len(indexParts) {
+					// TODO: This shouldn't happen, what do we do?
+					return
+				}
+			} else {
+				strLen = len(indexParts)
+			}
+			bytes := make([]byte, strLen)
+			for j := 0; j < strLen; j++ {
+				if indexParts[j] > 0xff {
+					// TODO: This shouldn't happen, what do we do?
+					return
+				}
+				bytes[j] = byte(indexParts[j])
+			}
+			val = bytes
+			indexParts = indexParts[strLen:]
+		default:
+			val = indexParts[0]
 			indexParts = indexParts[1:]
 		}
 		index[i] = indexNode.FormatValue(val, indexFormat)
