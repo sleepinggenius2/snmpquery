@@ -81,6 +81,10 @@ func (c *Client) SetCommunity(community string) {
 	c.snmp.Community = community
 }
 
+func (c *Client) SetMaxRepetitions(maxRepetitions uint8) {
+	c.snmp.MaxRepetitions = maxRepetitions
+}
+
 func (c *Client) SetReusePort(reusePort bool) {
 	c.snmp.ReusePort = reusePort
 }
