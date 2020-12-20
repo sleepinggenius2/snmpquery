@@ -103,6 +103,10 @@ func (c *Client) SetTimeout(d time.Duration) {
 	c.snmp.Timeout = d
 }
 
+func (c *Client) SetRetries(r int) {
+	c.snmp.Retries = r
+}
+
 func (c *Client) SetSecurity(username, authPassword, privPassword string) error {
 	authProtocol, authPassphrase, err := getAuth(authPassword)
 	if err != nil {
